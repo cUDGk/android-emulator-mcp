@@ -5,12 +5,9 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT = 15_000;
 
-let adbPath: string =
-  process.env.ADB_PATH || "adb";
-let emulatorPath: string =
-  process.env.EMULATOR_PATH || "emulator";
-let defaultDevice: string =
-  process.env.DEFAULT_DEVICE || "emulator-5554";
+let adbPath: string = process.env.ADB_PATH || "adb";
+let emulatorPath: string = process.env.EMULATOR_PATH || "emulator";
+let defaultDevice: string = process.env.DEFAULT_DEVICE || "emulator-5554";
 
 export function getAdbPath(): string {
   return adbPath;
@@ -129,15 +126,30 @@ export async function adbExecOut(
   });
 }
 
+// Cached device check - only re-verify after errors
+let deviceVerified = false;
+let deviceVerifiedAt = 0;
+const DEVICE_CACHE_TTL = 30_000; // 30s
+
 export async function ensureDevice(device: string): Promise<void> {
+  const now = Date.now();
+  if (deviceVerified && now - deviceVerifiedAt < DEVICE_CACHE_TTL) return;
+
   const result = await adb(["devices"]);
   const lines = result.stdout.trim().split("\n").slice(1);
   const found = lines.some(
     (l) => l.startsWith(device) && l.includes("device"),
   );
   if (!found) {
+    deviceVerified = false;
     throw new DeviceNotConnectedError(device);
   }
+  deviceVerified = true;
+  deviceVerifiedAt = now;
+}
+
+export function invalidateDeviceCache(): void {
+  deviceVerified = false;
 }
 
 export async function listDevices(): Promise<
@@ -170,10 +182,31 @@ export function clearScreenSizeCache(): void {
   screenSizeCache = null;
 }
 
+/**
+ * Dump UI hierarchy. Uses single-command approach:
+ * `uiautomator dump /dev/tty` outputs XML directly to stdout via exec-out,
+ * saving a round-trip compared to dump-to-file + cat.
+ * Falls back to file-based approach if direct dump fails.
+ */
 export async function dumpUI(device: string): Promise<string> {
-  const path = "/data/local/tmp/ui_dump.xml";
+  // Fast path: direct stdout dump via exec-out (single round-trip)
+  try {
+    const result = await adb(
+      ["exec-out", "uiautomator", "dump", "/dev/tty"],
+      { device, timeout: 10_000 },
+    );
+    const xml = result.stdout;
+    const end = xml.lastIndexOf("</hierarchy>");
+    if (end > 0) {
+      return xml.slice(0, end + "</hierarchy>".length);
+    }
+  } catch {
+    // fall through to file-based
+  }
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Slow fallback: file-based dump (two round-trips)
+  const path = "/data/local/tmp/ui_dump.xml";
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await adb(["shell", `uiautomator dump ${path}`], {
         device,
@@ -184,12 +217,11 @@ export async function dumpUI(device: string): Promise<string> {
         return result.stdout;
       }
     } catch {
-      // retry after short delay
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 300));
     }
   }
 
-  throw new AdbError("Failed to dump UI hierarchy after 3 attempts");
+  throw new AdbError("Failed to dump UI hierarchy");
 }
 
 export function sleep(ms: number): Promise<void> {

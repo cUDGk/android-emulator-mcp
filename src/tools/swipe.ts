@@ -18,112 +18,56 @@ export function registerSwipeTool(server: McpServer): void {
       direction: z
         .enum(["up", "down", "left", "right"])
         .optional()
-        .describe(
-          "Swipe direction (content movement direction: 'up' scrolls content up)",
-        ),
-      from_x: z.number().optional().describe("Custom start X"),
-      from_y: z.number().optional().describe("Custom start Y"),
-      to_x: z.number().optional().describe("Custom end X"),
-      to_y: z.number().optional().describe("Custom end Y"),
-      duration_ms: z
-        .number()
-        .optional()
-        .default(300)
-        .describe("Swipe duration in ms"),
+        .describe("Swipe direction (content movement)"),
+      from_x: z.number().optional(),
+      from_y: z.number().optional(),
+      to_x: z.number().optional(),
+      to_y: z.number().optional(),
+      duration_ms: z.number().optional().default(200).describe("Swipe duration (ms)"),
       get_ui_after: z.boolean().optional().default(true),
       device: z.string().optional(),
     },
-    async ({
-      direction,
-      from_x,
-      from_y,
-      to_x,
-      to_y,
-      duration_ms,
-      get_ui_after,
-      device,
-    }) => {
+    async ({ direction, from_x, from_y, to_x, to_y, duration_ms, get_ui_after, device }) => {
       const dev = resolveDevice(device);
       await ensureDevice(dev);
 
       let fx: number, fy: number, tx: number, ty: number;
 
-      if (
-        from_x !== undefined &&
-        from_y !== undefined &&
-        to_x !== undefined &&
-        to_y !== undefined
-      ) {
-        fx = from_x;
-        fy = from_y;
-        tx = to_x;
-        ty = to_y;
+      if (from_x !== undefined && from_y !== undefined && to_x !== undefined && to_y !== undefined) {
+        fx = from_x; fy = from_y; tx = to_x; ty = to_y;
       } else if (direction) {
         const size = await getScreenSize(dev);
         const cx = Math.round(size.width / 2);
         const cy = Math.round(size.height / 2);
         const dy = Math.round(size.height * 0.3);
         const dx = Math.round(size.width * 0.3);
-
         switch (direction) {
-          case "up":
-            fx = cx;
-            fy = cy + dy;
-            tx = cx;
-            ty = cy - dy;
-            break;
-          case "down":
-            fx = cx;
-            fy = cy - dy;
-            tx = cx;
-            ty = cy + dy;
-            break;
-          case "left":
-            fx = cx + dx;
-            fy = cy;
-            tx = cx - dx;
-            ty = cy;
-            break;
-          case "right":
-            fx = cx - dx;
-            fy = cy;
-            tx = cx + dx;
-            ty = cy;
-            break;
+          case "up":    fx = cx; fy = cy + dy; tx = cx; ty = cy - dy; break;
+          case "down":  fx = cx; fy = cy - dy; tx = cx; ty = cy + dy; break;
+          case "left":  fx = cx + dx; fy = cy; tx = cx - dx; ty = cy; break;
+          case "right": fx = cx - dx; fy = cy; tx = cx + dx; ty = cy; break;
         }
       } else {
         return {
-          content: [
-            {
-              type: "text",
-              text: "Either 'direction' or all custom coordinates (from_x, from_y, to_x, to_y) must be provided.",
-            },
-          ],
+          content: [{ type: "text", text: "Either 'direction' or custom coordinates required." }],
           isError: true,
         };
       }
 
-      await adb(
-        ["shell", `input swipe ${fx!} ${fy!} ${tx!} ${ty!} ${duration_ms}`],
-        { device: dev },
-      );
+      await adb(["shell", `input swipe ${fx!} ${fy!} ${tx!} ${ty!} ${duration_ms}`], { device: dev });
 
-      await sleep(300);
+      const swipeMsg = `Swiped ${direction || "custom"}: (${fx!},${fy!}) -> (${tx!},${ty!})`;
 
-      let uiText = "";
-      if (get_ui_after) {
-        const xml = await dumpUI(dev);
-        const tree = parseUIXml(xml, "visible");
-        uiText = `\n\nUI after swipe:\n${tree.text}`;
+      if (!get_ui_after) {
+        return { content: [{ type: "text", text: swipeMsg }] };
       }
 
+      await sleep(150);
+      const xml = await dumpUI(dev);
+      const tree = parseUIXml(xml, "visible");
+
       return {
-        content: [
-          {
-            type: "text",
-            text: `Swiped ${direction || "custom"}: (${fx!},${fy!}) -> (${tx!},${ty!})${uiText}`,
-          },
-        ],
+        content: [{ type: "text", text: `${swipeMsg}\n\nUI after:\n${tree.text}` }],
       };
     },
   );

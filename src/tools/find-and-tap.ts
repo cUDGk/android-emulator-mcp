@@ -6,7 +6,6 @@ import {
   resolveDevice,
   adb,
   sleep,
-  ElementNotFoundError,
 } from "../adb.js";
 import { findElements, parseUIXml } from "../parsers/ui-parser.js";
 import { centerOf, boundsToString } from "../utils/bounds.js";
@@ -30,11 +29,16 @@ export function registerFindAndTapTool(server: McpServer): void {
       wait_ms: z
         .number()
         .optional()
-        .default(500)
+        .default(200)
         .describe("Wait after tap before re-dumping UI (ms, max 5000)"),
+      get_ui_after: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe("Return UI tree after tap (set false for speed)"),
       device: z.string().optional(),
     },
-    async ({ by, value, exact, index, long_press, wait_ms, device }) => {
+    async ({ by, value, exact, index, long_press, wait_ms, get_ui_after, device }) => {
       const dev = resolveDevice(device);
       await ensureDevice(dev);
 
@@ -77,27 +81,29 @@ export function registerFindAndTapTool(server: McpServer): void {
         await adb(["shell", `input tap ${cx} ${cy}`], { device: dev });
       }
 
-      const waitTime = Math.min(wait_ms, 5000);
-      await sleep(waitTime);
-
-      const xmlAfter = await dumpUI(dev);
-      const treeAfter = parseUIXml(xmlAfter, "visible");
-
       const matchInfo =
         elements.length > 1
           ? ` (${elements.length} matches, used index ${index})`
           : "";
+      const tapMsg = `Tapped: ${element.className} ${by}="${element.text || element.resourceId || element.contentDesc}" at (${cx},${cy})${matchInfo}`;
+
+      if (!get_ui_after) {
+        return {
+          content: [{ type: "text", text: tapMsg }],
+        };
+      }
+
+      const waitTime = Math.min(wait_ms, 5000);
+      if (waitTime > 0) await sleep(waitTime);
+
+      const xmlAfter = await dumpUI(dev);
+      const treeAfter = parseUIXml(xmlAfter, "visible");
 
       return {
         content: [
           {
             type: "text",
-            text: [
-              `Tapped: ${element.className} ${by}="${element.text || element.resourceId || element.contentDesc}" at (${cx},${cy})${matchInfo}`,
-              "",
-              "UI after tap:",
-              treeAfter.text,
-            ].join("\n"),
+            text: `${tapMsg}\n\nUI after tap:\n${treeAfter.text}`,
           },
         ],
       };

@@ -12,6 +12,7 @@ import { registerScreenshotTool } from "./tools/screenshot.js";
 import { registerWaitForElementTool } from "./tools/wait.js";
 import { registerDeviceTool } from "./tools/device.js";
 import { registerShellTool } from "./tools/shell.js";
+import { registerBatchTool } from "./tools/batch.js";
 
 const server = new McpServer({
   name: "android-emulator-mcp",
@@ -29,6 +30,7 @@ registerScreenshotTool(server);
 registerWaitForElementTool(server);
 registerDeviceTool(server);
 registerShellTool(server);
+registerBatchTool(server);
 
 // Start server
 const transport = new StdioServerTransport();

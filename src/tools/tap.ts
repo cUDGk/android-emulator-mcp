@@ -6,7 +6,7 @@ import { parseUIXml } from "../parsers/ui-parser.js";
 export function registerTapTool(server: McpServer): void {
   server.tool(
     "tap",
-    "Tap at specific screen coordinates. Returns updated UI tree after tap.",
+    "Tap at specific screen coordinates. Optionally returns updated UI tree.",
     {
       x: z.number().describe("X coordinate"),
       y: z.number().describe("Y coordinate"),
@@ -14,13 +14,13 @@ export function registerTapTool(server: McpServer): void {
       wait_ms: z
         .number()
         .optional()
-        .default(500)
+        .default(200)
         .describe("Wait after tap (ms)"),
       get_ui_after: z
         .boolean()
         .optional()
         .default(true)
-        .describe("Return UI tree after tap"),
+        .describe("Return UI tree after tap (set false for speed)"),
       device: z.string().optional(),
     },
     async ({ x, y, long_press, wait_ms, get_ui_after, device }) => {
@@ -35,22 +35,21 @@ export function registerTapTool(server: McpServer): void {
         await adb(["shell", `input tap ${x} ${y}`], { device: dev });
       }
 
+      const tapMsg = `Tapped (${x}, ${y})${long_press ? " (long press)" : ""}`;
+
+      if (!get_ui_after) {
+        return { content: [{ type: "text", text: tapMsg }] };
+      }
+
       const waitTime = Math.min(wait_ms, 5000);
       if (waitTime > 0) await sleep(waitTime);
 
-      let uiText = "";
-      if (get_ui_after) {
-        const xml = await dumpUI(dev);
-        const tree = parseUIXml(xml, "visible");
-        uiText = `\n\nUI after tap:\n${tree.text}`;
-      }
+      const xml = await dumpUI(dev);
+      const tree = parseUIXml(xml, "visible");
 
       return {
         content: [
-          {
-            type: "text",
-            text: `Tapped (${x}, ${y})${long_press ? " (long press)" : ""}${uiText}`,
-          },
+          { type: "text", text: `${tapMsg}\n\nUI after tap:\n${tree.text}` },
         ],
       };
     },
