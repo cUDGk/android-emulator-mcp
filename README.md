@@ -2,59 +2,60 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An MCP (Model Context Protocol) server that lets AI assistants control Android emulators via ADB. Replaces expensive screenshot-based interaction with efficient structured UI tree text, reducing token consumption by ~60x.
+ADB経由でAndroidエミュレータを操作するMCP (Model Context Protocol) サーバー。スクリーンショットの代わりに構造化テキストでUI階層を取得し、トークン消費を約60分の1に削減します。
 
-## Why
+## なぜ必要か
 
-When AI assistants interact with Android emulators, they typically take screenshots to "see" the screen. Each screenshot costs ~100K tokens. This MCP server provides the screen state as structured text (~3-4K tokens) and enables one-call interactions like "find this button and tap it."
+AIアシスタントがAndroidエミュレータを操作する場合、通常はスクリーンショットで画面を「見て」います。1枚あたり約10万トークン消費します。このMCPサーバーは画面状態を構造化テキスト（約3-4千トークン）で提供し、「このボタンを探してタップ」を1回の呼び出しで完結させます。
 
-| Approach | Tokens per action | Tool calls |
-|----------|------------------|------------|
-| Screenshots | ~245,000 | 4 |
-| This MCP | ~4,000 | 1 |
+| 方式 | トークン/操作 | ツール呼び出し |
+|------|-------------|-------------|
+| スクリーンショット | ~245,000 | 4回 |
+| このMCP | ~4,000 | 1回 |
 
-## Tools
+## ツール一覧
 
-| Tool | Description |
-|------|-------------|
-| `get_ui_tree` | Get screen state as structured text (replaces screenshots) |
-| `find_and_tap` | Find element by text/id/desc and tap it, returns UI after |
-| `tap` | Tap at coordinates |
-| `type_text` | Type text (ASCII + Japanese/Unicode via clipboard) |
-| `press_key` | Press keys (BACK, HOME, ENTER, etc.) |
-| `swipe` | Swipe with direction presets or custom coordinates |
-| `screenshot` | Compressed JPEG screenshot (when UI tree isn't enough) |
-| `wait_for_element` | Poll until element appears |
-| `device` | Manage emulators: start/stop, install APKs, launch apps |
-| `shell` | Run arbitrary ADB shell commands |
+| ツール | 説明 |
+|--------|------|
+| `get_ui_tree` | 画面状態を構造化テキストで取得（スクショの代替） |
+| `find_and_tap` | テキスト/ID/説明で要素を探してタップ、タップ後のUIも返す |
+| `tap` | 座標指定でタップ |
+| `type_text` | テキスト入力（ASCII + 日本語等はクリップボード経由） |
+| `press_key` | キー押下（BACK, HOME, ENTER等） |
+| `swipe` | 方向プリセットまたは座標指定でスワイプ |
+| `screenshot` | 圧縮JPEGスクリーンショット（UIツリーで不十分な場合のみ） |
+| `wait_for_element` | 要素が出現するまでポーリング |
+| `device` | エミュレータ管理：起動/停止、APKインストール、アプリ起動 |
+| `shell` | 任意のADBシェルコマンド実行 |
+| `batch` | 複数アクションを1回の呼び出しで一括実行（高速） |
 
-## Requirements
+## 必要環境
 
 - Node.js >= 18
-- ADB (Android SDK Platform Tools)
-- Android Emulator or physical device
-- ffmpeg (optional, for screenshot compression)
+- ADB（Android SDK Platform Tools）
+- Androidエミュレータまたは実機
+- ffmpeg（任意、スクリーンショット圧縮用）
 
-## Setup
+## セットアップ
 
-### 1. Install
+### 1. インストール
 
 ```bash
 npm install -g android-emulator-mcp
 ```
 
-Or clone and build:
+またはクローンしてビルド：
 
 ```bash
-git clone https://github.com/user/android-emulator-mcp.git
+git clone https://github.com/cUDGk/android-emulator-mcp.git
 cd android-emulator-mcp
 npm install
 npm run build
 ```
 
-### 2. Configure MCP
+### 2. MCP設定
 
-Add to your Claude Code settings (`~/.claude.json`):
+Claude Codeの設定ファイル（`~/.claude.json`）に追加：
 
 ```json
 {
@@ -73,59 +74,70 @@ Add to your Claude Code settings (`~/.claude.json`):
 }
 ```
 
-If `adb` and `emulator` are in your PATH, the env vars are optional.
+`adb` と `emulator` がPATHに通っていれば、環境変数は省略可能です。
 
-## UI Tree Output
+## UIツリー出力
 
-Instead of screenshots, `get_ui_tree` returns structured text like:
+スクリーンショットの代わりに `get_ui_tree` が構造化テキストを返します：
 
 ```
 [activity=com.android.chrome/.ChromeTabbedActivity]
 
 FrameLayout #content [0,42][720,1238]
   WebView t="Wikipedia" [S] [0,140][720,1155]
-    Button #searchIcon t="Search" [C] [600,200][680,260]
+    Button #searchIcon t="検索" [C] [600,200][680,260]
   FrameLayout #toolbar_container [0,42][720,140]
-    EditText #url_bar t="en.wikipedia.org" [C][F] [52,56][668,98]
+    EditText #url_bar t="ja.wikipedia.org" [C][F] [52,56][668,98]
 
 [436 nodes -> 89 shown, filter=visible]
 ```
 
-Flags: `[C]`=clickable, `[S]`=scrollable, `[F]`=focused, `[K]`=checked, `[X]`=selected, `[!E]`=disabled, `[P]`=password
+フラグ: `[C]`=クリック可, `[S]`=スクロール可, `[F]`=フォーカス中, `[K]`=チェック済, `[X]`=選択中, `[!E]`=無効, `[P]`=パスワード
 
-### Filter modes
+### フィルターモード
 
-- `visible` (default): Hides zero-bounds nodes and empty containers
-- `interactive`: Only clickable/scrollable/focusable elements
-- `all`: Raw full tree
+- `visible`（デフォルト）: bounds が [0,0][0,0] のノードと空コンテナを除外
+- `interactive`: クリック可/スクロール可/フォーカス可の要素のみ
+- `all`: 全ノード表示
 
-## Examples
+## 使用例
 
-### Find and tap a button
+### ボタンを探してタップ
 
 ```
-find_and_tap(by="text", value="Login")
+find_and_tap(by="text", value="ログイン")
 ```
 
-### Type into search
+### 検索欄に入力
 
 ```
 find_and_tap(by="id", value="search_bar")
 type_text(text="hello world", submit=true)
 ```
 
-### Scroll down
+### スクロール
 
 ```
 swipe(direction="up")
 ```
 
-### Start emulator
+### 複数操作を一括実行
+
+```
+batch(actions=[
+  {"action":"find_and_tap", "by":"text", "value":"Chrome"},
+  {"action":"sleep", "ms":500},
+  {"action":"find_and_tap", "by":"id", "value":"url_bar"},
+  {"action":"type", "text":"ノネコ wikipedia", "submit":true}
+])
+```
+
+### エミュレータ起動
 
 ```
 device(action="start_emulator", avd_name="claude_lite")
 ```
 
-## License
+## ライセンス
 
 MIT
