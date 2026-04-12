@@ -56,9 +56,7 @@ function hasContent(node: UINode): boolean {
 }
 
 function isInteractive(node: UINode): boolean {
-  return (
-    node.clickable || node.scrollable || node.focusable || node.checked
-  );
+  return node.clickable || node.scrollable || node.focusable || node.checked;
 }
 
 function filterVisible(node: UINode, maxDepth: number, depth: number): UINode | null {
@@ -70,17 +68,11 @@ function filterVisible(node: UINode, maxDepth: number, depth: number): UINode | 
     if (filtered) filteredChildren.push(filtered);
   }
 
-  // Remove zero-bounds leaf nodes that have no content
   if (isZeroBounds(node.bounds) && !hasContent(node) && filteredChildren.length === 0) {
     return null;
   }
 
-  // Flatten: empty container with single child
-  if (
-    !hasContent(node) &&
-    !isInteractive(node) &&
-    filteredChildren.length === 1
-  ) {
+  if (!hasContent(node) && !isInteractive(node) && filteredChildren.length === 1) {
     return filteredChildren[0];
   }
 
@@ -120,9 +112,7 @@ function renderNode(node: UINode, depth: number, lines: string[]): void {
   const parts: string[] = [node.className];
 
   if (node.resourceId) parts.push(`#${node.resourceId}`);
-
   if (node.text) parts.push(`t="${truncate(node.text, 30)}"`);
-
   if (node.contentDesc) parts.push(`d="${truncate(node.contentDesc, 30)}"`);
 
   const flags: string[] = [];
@@ -144,6 +134,29 @@ function renderNode(node: UINode, depth: number, lines: string[]): void {
   }
 }
 
+// ─── Parsed UI tree (parse once, use for both rendering and searching) ───
+
+export interface ParsedUI {
+  roots: UINode[];
+  totalNodes: number;
+}
+
+export function parseXmlToTree(xml: string): ParsedUI {
+  const parsed = xmlParser.parse(xml);
+  const hierarchy = parsed.hierarchy;
+  if (!hierarchy || !hierarchy.node) {
+    return { roots: [], totalNodes: 0 };
+  }
+
+  const nodes = Array.isArray(hierarchy.node)
+    ? hierarchy.node
+    : [hierarchy.node];
+  const roots: UINode[] = nodes.map(parseNode);
+  const totalNodes = roots.reduce((sum: number, r: UINode) => sum + countNodes(r), 0);
+
+  return { roots, totalNodes };
+}
+
 export interface ParseResult {
   text: string;
   totalNodes: number;
@@ -151,43 +164,35 @@ export interface ParseResult {
   filterMode: FilterMode;
 }
 
+/**
+ * Render UI tree to compressed text.
+ * Accepts either raw XML string or pre-parsed ParsedUI to avoid double-parsing.
+ */
 export function parseUIXml(
-  xml: string,
+  xmlOrTree: string | ParsedUI,
   filter: FilterMode = "visible",
   maxDepth: number = 15,
 ): ParseResult {
-  const parsed = xmlParser.parse(xml);
-  const hierarchy = parsed.hierarchy;
-  if (!hierarchy || !hierarchy.node) {
-    return {
-      text: "[empty screen]",
-      totalNodes: 0,
-      shownNodes: 0,
-      filterMode: filter,
-    };
+  const tree = typeof xmlOrTree === "string" ? parseXmlToTree(xmlOrTree) : xmlOrTree;
+
+  if (tree.roots.length === 0) {
+    return { text: "[empty screen]", totalNodes: 0, shownNodes: 0, filterMode: filter };
   }
-
-  const nodes = Array.isArray(hierarchy.node)
-    ? hierarchy.node
-    : [hierarchy.node];
-  const roots: UINode[] = nodes.map(parseNode);
-
-  const totalNodes = roots.reduce((sum: number, r: UINode) => sum + countNodes(r), 0);
 
   let filteredRoots: UINode[];
   switch (filter) {
     case "interactive":
-      filteredRoots = roots
+      filteredRoots = tree.roots
         .map((r: UINode) => filterInteractive(r, maxDepth, 0))
         .filter((r: UINode | null): r is UINode => r !== null);
       break;
     case "visible":
-      filteredRoots = roots
+      filteredRoots = tree.roots
         .map((r: UINode) => filterVisible(r, maxDepth, 0))
         .filter((r: UINode | null): r is UINode => r !== null);
       break;
     default:
-      filteredRoots = roots;
+      filteredRoots = tree.roots;
   }
 
   const lines: string[] = [];
@@ -196,55 +201,41 @@ export function parseUIXml(
   }
 
   const shownNodes = filteredRoots.reduce(
-    (sum, r) => sum + countNodes(r),
+    (sum: number, r: UINode) => sum + countNodes(r),
     0,
   );
 
   const text =
     lines.join("\n") +
-    `\n\n[${totalNodes} nodes -> ${shownNodes} shown, filter=${filter}]`;
+    `\n\n[${tree.totalNodes} nodes -> ${shownNodes} shown, filter=${filter}]`;
 
-  return { text, totalNodes, shownNodes, filterMode: filter };
+  return { text, totalNodes: tree.totalNodes, shownNodes, filterMode: filter };
 }
 
-export function findElements(
-  xml: string,
+/**
+ * Search elements in a pre-parsed tree (avoids re-parsing XML).
+ */
+export function findElementsInTree(
+  tree: ParsedUI,
   by: "text" | "id" | "desc" | "class",
   value: string,
   exact: boolean = false,
 ): UINode[] {
-  const parsed = xmlParser.parse(xml);
-  const hierarchy = parsed.hierarchy;
-  if (!hierarchy || !hierarchy.node) return [];
-
-  const nodes = Array.isArray(hierarchy.node)
-    ? hierarchy.node
-    : [hierarchy.node];
-  const roots = nodes.map(parseNode);
-
   const results: UINode[] = [];
+  const valueLower = exact ? "" : value.toLowerCase();
 
   function search(node: UINode): void {
     let target: string;
     switch (by) {
-      case "text":
-        target = node.text;
-        break;
-      case "id":
-        target = node.resourceId;
-        break;
-      case "desc":
-        target = node.contentDesc;
-        break;
-      case "class":
-        target = node.className;
-        break;
+      case "text":  target = node.text; break;
+      case "id":    target = node.resourceId; break;
+      case "desc":  target = node.contentDesc; break;
+      case "class": target = node.className; break;
     }
 
     const match = exact
       ? target === value
-      : target.toLowerCase().includes(value.toLowerCase());
-
+      : target.toLowerCase().includes(valueLower);
     if (match) results.push(node);
 
     for (const child of node.children) {
@@ -252,9 +243,21 @@ export function findElements(
     }
   }
 
-  for (const root of roots) {
+  for (const root of tree.roots) {
     search(root);
   }
 
   return results;
+}
+
+/**
+ * Legacy wrapper: parse XML and search (for backward compat).
+ */
+export function findElements(
+  xml: string,
+  by: "text" | "id" | "desc" | "class",
+  value: string,
+  exact: boolean = false,
+): UINode[] {
+  return findElementsInTree(parseXmlToTree(xml), by, value, exact);
 }

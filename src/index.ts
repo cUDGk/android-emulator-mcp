@@ -32,6 +32,11 @@ registerDeviceTool(server);
 registerShellTool(server);
 registerBatchTool(server);
 
-// Start server
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Start server with error handling
+try {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+} catch (err) {
+  console.error("Failed to start MCP server:", err);
+  process.exit(1);
+}

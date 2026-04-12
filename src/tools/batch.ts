@@ -52,16 +52,19 @@ export function registerBatchTool(server: McpServer): void {
         .describe(
           'Array of actions. Examples: [{"action":"find_and_tap","by":"text","value":"OK"}, {"action":"sleep","ms":300}, {"action":"swipe","direction":"up"}]',
         ),
+      stop_on_error: z.boolean().optional().default(true).describe("Stop batch on first error"),
       get_ui_after: z.boolean().optional().default(true),
       device: z.string().optional(),
     },
-    async ({ actions, get_ui_after, device }) => {
+    async ({ actions, stop_on_error, get_ui_after, device }) => {
       const dev = resolveDevice(device);
       await ensureDevice(dev);
 
       const log: string[] = [];
+      let stopped = false;
 
       for (let i = 0; i < actions.length; i++) {
+        if (stopped) break;
         const a = actions[i];
         try {
           switch (a.action) {
@@ -78,19 +81,25 @@ export function registerBatchTool(server: McpServer): void {
             case "find_and_tap": {
               if (!a.by || !a.value) {
                 log.push(`[${i}] find_and_tap: ERROR - by and value required`);
+                if (stop_on_error) stopped = true;
                 break;
               }
               const xml = await dumpUI(dev);
               const elements = findElements(xml, a.by, a.value, false);
               if (elements.length === 0) {
                 log.push(`[${i}] find_and_tap: NOT FOUND ${a.by}="${a.value}"`);
+                if (stop_on_error) stopped = true;
                 break;
               }
-              const [cx, cy] = centerOf(elements[0].bounds);
+              const el = elements[0];
+              if (el.bounds.x1 === 0 && el.bounds.y1 === 0 && el.bounds.x2 === 0 && el.bounds.y2 === 0) {
+                log.push(`[${i}] find_and_tap: ZERO BOUNDS ${a.by}="${a.value}" (not visible)`);
+                if (stop_on_error) stopped = true;
+                break;
+              }
+              const [cx, cy] = centerOf(el.bounds);
               await adb(["shell", `input tap ${cx} ${cy}`], { device: dev });
-              log.push(
-                `[${i}] find_and_tap ${a.by}="${a.value}" -> (${cx},${cy})`,
-              );
+              log.push(`[${i}] find_and_tap ${a.by}="${a.value}" -> (${cx},${cy})`);
               break;
             }
 
@@ -100,8 +109,7 @@ export function registerBatchTool(server: McpServer): void {
                 break;
               }
               if (a.clear_first) {
-                await adbShell("input keyevent KEYCODE_CTRL_LEFT KEYCODE_A", dev);
-                await adbShell("input keyevent KEYCODE_DEL", dev);
+                await adbShell("input keyevent KEYCODE_CTRL_LEFT KEYCODE_A KEYCODE_DEL", dev);
               }
               const isAscii = /^[\x20-\x7E]+$/.test(a.text);
               if (isAscii) {
@@ -178,6 +186,7 @@ export function registerBatchTool(server: McpServer): void {
           }
         } catch (err: any) {
           log.push(`[${i}] ${a.action}: ERROR - ${err.message}`);
+          if (stop_on_error) stopped = true;
         }
       }
 

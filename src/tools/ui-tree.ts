@@ -26,14 +26,14 @@ export function registerUiTreeTool(server: McpServer): void {
 
       const [xml, activity] = await Promise.all([
         dumpUI(dev),
-        adbShell("dumpsys activity activities | grep mResumedActivity", dev).catch(
+        adbShell("dumpsys window | grep mCurrentFocus", dev).catch(
           () => "",
         ),
       ]);
 
       const result = parseUIXml(xml, filter, max_depth);
 
-      const activityMatch = activity.match(/u0\s+(\S+)/);
+      const activityMatch = activity.match(/mCurrentFocus=\S+\s+(\S+)/);
       const currentActivity = activityMatch ? activityMatch[1] : "unknown";
 
       const header = `[activity=${currentActivity}]`;

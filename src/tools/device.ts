@@ -9,6 +9,7 @@ import {
   getEmulatorPath,
   sleep,
   clearScreenSizeCache,
+  invalidateDeviceCache,
 } from "../adb.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -181,12 +182,20 @@ export function registerDeviceTool(server: McpServer): void {
           }
 
           clearScreenSizeCache();
+          invalidateDeviceCache();
+
+          // Check if boot actually completed
+          const bootProp = await adbShell("getprop sys.boot_completed").catch(() => "");
+          const bootOk = bootProp.trim() === "1";
+          const bootTime = Math.round((Date.now() - start) / 1000);
 
           return {
             content: [
               {
                 type: "text",
-                text: `Emulator '${avd_name}' started. Boot time: ${Math.round((Date.now() - start) / 1000)}s`,
+                text: bootOk
+                  ? `Emulator '${avd_name}' started. Boot time: ${bootTime}s`
+                  : `WARNING: Emulator '${avd_name}' started but boot may not be complete (${bootTime}s elapsed). Try again shortly.`,
               },
             ],
           };
@@ -195,7 +204,8 @@ export function registerDeviceTool(server: McpServer): void {
         case "kill_emulator": {
           const dev = resolveDevice(device);
           await adb(["-s", dev, "emu", "kill"]).catch(() => {});
-          clearScreenSizeCache();
+          clearScreenSizeCache(dev);
+          invalidateDeviceCache(dev);
           return {
             content: [{ type: "text", text: `Emulator ${dev} killed.` }],
           };

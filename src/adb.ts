@@ -1,13 +1,13 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT = 15_000;
 
-let adbPath: string = process.env.ADB_PATH || "adb";
-let emulatorPath: string = process.env.EMULATOR_PATH || "emulator";
-let defaultDevice: string = process.env.DEFAULT_DEVICE || "emulator-5554";
+const adbPath: string = process.env.ADB_PATH || "adb";
+const emulatorPath: string = process.env.EMULATOR_PATH || "emulator";
+const defaultDevice: string = process.env.DEFAULT_DEVICE || "emulator-5554";
 
 export function getAdbPath(): string {
   return adbPath;
@@ -24,6 +24,8 @@ export function getDefaultDevice(): string {
 export function resolveDevice(device?: string): string {
   return device || defaultDevice;
 }
+
+// ─── Errors ───
 
 export class AdbError extends Error {
   constructor(message: string) {
@@ -48,6 +50,8 @@ export class ElementNotFoundError extends AdbError {
   }
 }
 
+// ─── Core ADB ───
+
 function cleanOutput(s: string): string {
   return s.replace(/\r\n/g, "\n").replace(/\r/g, "");
 }
@@ -68,7 +72,7 @@ export async function adb(
   try {
     const result = await execFileAsync(adbPath, fullArgs, {
       timeout: options?.timeout ?? DEFAULT_TIMEOUT,
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
     });
     return {
@@ -78,7 +82,7 @@ export async function adb(
   } catch (err: any) {
     if (err.killed) {
       throw new AdbError(
-        `ADB command timed out after ${options?.timeout ?? DEFAULT_TIMEOUT}ms: adb ${fullArgs.join(" ")}`,
+        `ADB timed out (${options?.timeout ?? DEFAULT_TIMEOUT}ms): adb ${fullArgs.join(" ")}`,
       );
     }
     if (err.code === "ENOENT") {
@@ -86,8 +90,10 @@ export async function adb(
         `ADB not found at '${adbPath}'. Set ADB_PATH environment variable.`,
       );
     }
+    const detail = cleanOutput(err.stderr || err.message || "unknown error");
+    const exitCode = err.code != null ? ` (exit ${err.code})` : "";
     throw new AdbError(
-      `ADB command failed: adb ${fullArgs.join(" ")}\n${cleanOutput(err.stderr || err.message)}`,
+      `ADB failed${exitCode}: adb ${fullArgs.join(" ")}\n${detail}`,
     );
   }
 }
@@ -100,40 +106,55 @@ export async function adbShell(
   return result.stdout;
 }
 
+/**
+ * Capture binary output from ADB using spawn (no maxBuffer limit, no type hacks).
+ * Safer than execFile with encoding:"buffer" on Windows.
+ */
 export async function adbExecOut(
   args: string[],
   device?: string,
+  timeout: number = 30_000,
 ): Promise<Buffer> {
   const fullArgs = device
     ? ["-s", device, "exec-out", ...args]
     : ["exec-out", ...args];
 
   return new Promise((resolve, reject) => {
-    execFile(
-      adbPath,
-      fullArgs,
-      {
-        encoding: "buffer" as any,
-        maxBuffer: 20 * 1024 * 1024,
-        windowsHide: true,
-        timeout: 30_000,
-      },
-      (err, stdout) => {
-        if (err) return reject(new AdbError(`exec-out failed: ${err.message}`));
-        resolve(stdout as unknown as Buffer);
-      },
-    );
+    const chunks: Buffer[] = [];
+    const proc = spawn(adbPath, fullArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new AdbError(`exec-out timed out (${timeout}ms): ${args.join(" ")}`));
+    }, timeout);
+
+    proc.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 && chunks.length === 0) {
+        return reject(new AdbError(`exec-out failed (exit ${code}): ${args.join(" ")}`));
+      }
+      resolve(Buffer.concat(chunks));
+    });
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(new AdbError(`exec-out error: ${err.message}`));
+    });
   });
 }
 
-// Cached device check - only re-verify after errors
-let deviceVerified = false;
-let deviceVerifiedAt = 0;
-const DEVICE_CACHE_TTL = 30_000; // 30s
+// ─── Device verification (per-device cache) ───
+
+const deviceCache = new Map<string, number>();
+const DEVICE_CACHE_TTL = 30_000;
 
 export async function ensureDevice(device: string): Promise<void> {
   const now = Date.now();
-  if (deviceVerified && now - deviceVerifiedAt < DEVICE_CACHE_TTL) return;
+  const cached = deviceCache.get(device);
+  if (cached && now - cached < DEVICE_CACHE_TTL) return;
 
   const result = await adb(["devices"]);
   const lines = result.stdout.trim().split("\n").slice(1);
@@ -141,15 +162,18 @@ export async function ensureDevice(device: string): Promise<void> {
     (l) => l.startsWith(device) && l.includes("device"),
   );
   if (!found) {
-    deviceVerified = false;
+    deviceCache.delete(device);
     throw new DeviceNotConnectedError(device);
   }
-  deviceVerified = true;
-  deviceVerifiedAt = now;
+  deviceCache.set(device, now);
 }
 
-export function invalidateDeviceCache(): void {
-  deviceVerified = false;
+export function invalidateDeviceCache(device?: string): void {
+  if (device) {
+    deviceCache.delete(device);
+  } else {
+    deviceCache.clear();
+  }
 }
 
 export async function listDevices(): Promise<
@@ -165,31 +189,58 @@ export async function listDevices(): Promise<
     });
 }
 
-let screenSizeCache: { width: number; height: number } | null = null;
+// ─── Screen size cache (per-device) ───
+
+const screenSizeMap = new Map<string, { width: number; height: number }>();
 
 export async function getScreenSize(
   device: string,
 ): Promise<{ width: number; height: number }> {
-  if (screenSizeCache) return screenSizeCache;
+  const cached = screenSizeMap.get(device);
+  if (cached) return cached;
   const output = await adbShell("wm size", device);
   const m = output.match(/(\d+)x(\d+)/);
   if (!m) return { width: 720, height: 1280 };
-  screenSizeCache = { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
-  return screenSizeCache;
+  const size = { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
+  screenSizeMap.set(device, size);
+  return size;
 }
 
-export function clearScreenSizeCache(): void {
-  screenSizeCache = null;
+export function clearScreenSizeCache(device?: string): void {
+  if (device) {
+    screenSizeMap.delete(device);
+  } else {
+    screenSizeMap.clear();
+  }
 }
 
-/**
- * Dump UI hierarchy. Uses single-command approach:
- * `uiautomator dump /dev/tty` outputs XML directly to stdout via exec-out,
- * saving a round-trip compared to dump-to-file + cat.
- * Falls back to file-based approach if direct dump fails.
- */
+// ─── UI Dump with mutex (prevents concurrent uiautomator calls) ───
+
+let dumpLock: Promise<string> | null = null;
+
 export async function dumpUI(device: string): Promise<string> {
-  // Fast path: direct stdout dump via exec-out (single round-trip)
+  // Serialize concurrent dump requests
+  if (dumpLock) {
+    try {
+      return await dumpLock;
+    } catch {
+      // Previous dump failed, try our own
+    }
+  }
+
+  const promise = dumpUIInternal(device);
+  dumpLock = promise;
+
+  try {
+    const result = await promise;
+    return result;
+  } finally {
+    if (dumpLock === promise) dumpLock = null;
+  }
+}
+
+async function dumpUIInternal(device: string): Promise<string> {
+  // Fast path: direct stdout via exec-out (single round-trip)
   try {
     const result = await adb(
       ["exec-out", "uiautomator", "dump", "/dev/tty"],
@@ -200,13 +251,19 @@ export async function dumpUI(device: string): Promise<string> {
     if (end > 0) {
       return xml.slice(0, end + "</hierarchy>".length);
     }
-  } catch {
-    // fall through to file-based
+  } catch (err: any) {
+    // If device disconnected, fail fast
+    if (err.message?.includes("device") && err.message?.includes("not found")) {
+      invalidateDeviceCache(device);
+      throw err;
+    }
   }
 
-  // Slow fallback: file-based dump (two round-trips)
+  // Slow fallback: file-based (two round-trips), exponential backoff
   const path = "/data/local/tmp/ui_dump.xml";
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const delays = [300, 600, 1200];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await adb(["shell", `uiautomator dump ${path}`], {
         device,
@@ -217,11 +274,15 @@ export async function dumpUI(device: string): Promise<string> {
         return result.stdout;
       }
     } catch {
-      await new Promise((r) => setTimeout(r, 300));
+      if (attempt < delays.length) {
+        await sleep(delays[attempt]);
+      }
     }
   }
 
-  throw new AdbError("Failed to dump UI hierarchy");
+  throw new AdbError(
+    "Failed to dump UI hierarchy after 3 attempts. Screen may be animating or transitioning.",
+  );
 }
 
 export function sleep(ms: number): Promise<void> {
