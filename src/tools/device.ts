@@ -154,6 +154,8 @@ export function registerDeviceTool(server: McpServer): void {
             };
           }
 
+          // Note: detached:true on Windows spawns a visible console window.
+          // Using detached:false + unref() keeps the emulator GUI but hides console.
           const child = spawn(
             getEmulatorPath(),
             [
@@ -164,7 +166,7 @@ export function registerDeviceTool(server: McpServer): void {
               "-gpu",
               "auto",
             ],
-            { detached: true, stdio: "ignore", windowsHide: true },
+            { detached: false, stdio: "ignore", windowsHide: true },
           );
           child.unref();
 
