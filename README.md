@@ -76,6 +76,55 @@ Claude Codeの設定ファイル（`~/.claude.json`）に追加：
 
 `adb` と `emulator` がPATHに通っていれば、環境変数は省略可能です。
 
+## 推奨AVD構成
+
+このMCPは**UIツリーをテキストで取得する**ため、高解像度・高スペックなAVDは不要です。以下は軽量＆root可能な推奨構成です。
+
+### 作成手順
+
+```bash
+# 1. システムイメージ（google_apis版。playstore版はrootが取れない）
+sdkmanager "system-images;android-34;google_apis;x86_64"
+
+# 2. AVD作成
+avdmanager create avd -n claude_lite \
+  -k "system-images;android-34;google_apis;x86_64" \
+  -d pixel_2
+```
+
+### config.ini の推奨値
+
+`~/.android/avd/<AVD名>.avd/config.ini` を編集：
+
+| 項目 | 値 | 理由 |
+|------|-----|------|
+| `PlayStore.enabled` | `no` | `adb root` を通すため |
+| `hw.lcd.width` / `hw.lcd.height` | `720` / `1280` | UIダンプ高速化・bounds計算軽量化 |
+| `hw.lcd.density` | `280` | 720x1280と整合 |
+| `hw.ramSize` | `1536M`〜`8192M` | 用途で選択（下表参照） |
+| `hw.cpu.ncore` | `2` | 大半のアプリで十分 |
+| `hw.gpu.enabled` / `hw.gpu.mode` | `yes` / `auto` | ブート時間短縮 |
+| `showDeviceFrame` | `no` | ウィンドウ縮小 |
+| `hw.keyboard` | `yes` | `type_text` でハードウェアキーボード入力を使うため |
+
+### RAM サイズの目安
+
+| 用途 | RAM | 備考 |
+|------|-----|------|
+| 軽量アプリ・Webブラウジング | 1536M | デフォルト |
+| 一般アプリ・SNS | 3072M | バランス型 |
+| 重量アプリ・ゲーム | 8192M | Unityゲーム等 |
+
+※ホストメモリの25%以下を目安に。
+
+### 起動確認
+
+```
+device(action="start_emulator", avd_name="claude_lite")
+```
+
+`emulator -list-avds` に出ているAVDはMCPから直接 `avd_name` に渡せます。
+
 ## UIツリー出力
 
 スクリーンショットの代わりに `get_ui_tree` が構造化テキストを返します：
