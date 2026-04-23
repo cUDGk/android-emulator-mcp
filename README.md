@@ -187,6 +187,10 @@ batch(actions=[
 device(action="start_emulator", avd_name="claude_lite")
 ```
 
+## v1.0.1 修正
+
+`batch` ツールの `actions` 配列引数が Claude Code の一部ツール使用パスから JSON 文字列として届くケースに対応。zod スキーマを `z.union([z.array(...), z.string()])` に変更し、ハンドラ内で文字列を JSON.parse してから再検証するように修正した。これにより `actions` が文字列化されていても正しく配列として処理される。
+
 ## ライセンス
 
 MIT

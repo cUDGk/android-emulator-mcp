@@ -11,6 +11,7 @@ import {
 } from "../adb.js";
 import { findElements, parseUIXml } from "../parsers/ui-parser.js";
 import { centerOf } from "../utils/bounds.js";
+import { coerceObject } from "../utils/coerce.js";
 
 const actionSchema = z.object({
   action: z
@@ -47,8 +48,9 @@ export function registerBatchTool(server: McpServer): void {
     "batch",
     "Execute multiple actions in sequence with a single tool call. Much faster than calling tools individually. Returns UI tree only once at the end.",
     {
+      // Claude Code の一部ツール使用パスでは array 型引数が JSON 文字列で届くため string も受ける
       actions: z
-        .array(actionSchema)
+        .union([z.array(actionSchema), z.string()])
         .describe(
           'Array of actions. Examples: [{"action":"find_and_tap","by":"text","value":"OK"}, {"action":"sleep","ms":300}, {"action":"swipe","direction":"up"}]',
         ),
@@ -56,7 +58,23 @@ export function registerBatchTool(server: McpServer): void {
       get_ui_after: z.boolean().optional().default(true),
       device: z.string().optional(),
     },
-    async ({ actions, stop_on_error, get_ui_after, device }) => {
+    async ({ actions: actionsRaw, stop_on_error, get_ui_after, device }) => {
+      const coerced = coerceObject<z.infer<typeof actionSchema>[]>(actionsRaw);
+      if (!coerced || !Array.isArray(coerced)) {
+        return {
+          content: [{ type: "text", text: "actions must be an array (got string that failed to parse as JSON array)" }],
+          isError: true,
+        };
+      }
+      const parsed = z.array(actionSchema).safeParse(coerced);
+      if (!parsed.success) {
+        return {
+          content: [{ type: "text", text: `actions validation failed: ${parsed.error.message}` }],
+          isError: true,
+        };
+      }
+      const actions = parsed.data;
+
       const dev = resolveDevice(device);
       await ensureDevice(dev);
 
