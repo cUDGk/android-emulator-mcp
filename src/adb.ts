@@ -79,19 +79,22 @@ export async function adb(
       stdout: cleanOutput(result.stdout),
       stderr: cleanOutput(result.stderr || ""),
     };
-  } catch (err: any) {
-    if (err.killed) {
+  } catch (err) {
+    if (err instanceof AdbError) throw err;
+    // execFile rejects with a NodeJS.ErrnoException-shaped object
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; stderr?: string };
+    if (e.killed) {
       throw new AdbError(
         `ADB timed out (${options?.timeout ?? DEFAULT_TIMEOUT}ms): adb ${fullArgs.join(" ")}`,
       );
     }
-    if (err.code === "ENOENT") {
+    if (e.code === "ENOENT") {
       throw new AdbError(
         `ADB not found at '${adbPath}'. Set ADB_PATH environment variable.`,
       );
     }
-    const detail = cleanOutput(err.stderr || err.message || "unknown error");
-    const exitCode = err.code != null ? ` (exit ${err.code})` : "";
+    const detail = cleanOutput(e.stderr || (err instanceof Error ? err.message : String(err)) || "unknown error");
+    const exitCode = e.code != null ? ` (exit ${e.code})` : "";
     throw new AdbError(
       `ADB failed${exitCode}: adb ${fullArgs.join(" ")}\n${detail}`,
     );
@@ -121,6 +124,7 @@ export async function adbExecOut(
 
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     const proc = spawn(adbPath, fullArgs, {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -132,10 +136,16 @@ export async function adbExecOut(
     }, timeout);
 
     proc.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+    // Drain stderr so the child cannot deadlock when its stderr pipe fills.
+    proc.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
     proc.on("close", (code) => {
       clearTimeout(timer);
-      if (code !== 0 && chunks.length === 0) {
-        return reject(new AdbError(`exec-out failed (exit ${code}): ${args.join(" ")}`));
+      if (code !== 0) {
+        const stderrText = Buffer.concat(stderrChunks).toString("utf-8").trim();
+        const detail = stderrText.length > 0 ? `\n${stderrText}` : "";
+        return reject(
+          new AdbError(`exec-out failed (exit ${code}): ${args.join(" ")}${detail}`),
+        );
       }
       resolve(Buffer.concat(chunks));
     });
@@ -158,9 +168,10 @@ export async function ensureDevice(device: string): Promise<void> {
 
   const result = await adb(["devices"]);
   const lines = result.stdout.trim().split("\n").slice(1);
-  const found = lines.some(
-    (l) => l.startsWith(device) && l.includes("device"),
-  );
+  const found = lines.some((l) => {
+    const [serial, status] = l.split("\t");
+    return serial === device && status === "device";
+  });
   if (!found) {
     deviceCache.delete(device);
     throw new DeviceNotConnectedError(device);
@@ -185,7 +196,7 @@ export async function listDevices(): Promise<
     .filter((l) => l.trim().length > 0)
     .map((l) => {
       const parts = l.split("\t");
-      return { serial: parts[0], status: parts[1] || "unknown" };
+      return { serial: parts[0] ?? "", status: parts[1] ?? "unknown" };
     });
 }
 
@@ -200,7 +211,9 @@ export async function getScreenSize(
   if (cached) return cached;
   const output = await adbShell("wm size", device);
   const m = output.match(/(\d+)x(\d+)/);
-  if (!m) return { width: 720, height: 1280 };
+  if (!m || m[1] === undefined || m[2] === undefined) {
+    return { width: 720, height: 1280 };
+  }
   const size = { width: parseInt(m[1], 10), height: parseInt(m[2], 10) };
   screenSizeMap.set(device, size);
   return size;
@@ -214,33 +227,43 @@ export function clearScreenSizeCache(device?: string): void {
   }
 }
 
-// ─── UI Dump with mutex (prevents concurrent uiautomator calls) ───
+// ─── UI Dump with per-device mutex (prevents concurrent uiautomator calls) ───
 
-let dumpLock: Promise<string> | null = null;
+const dumpLocks = new Map<string, Promise<string>>();
 
 export async function dumpUI(device: string): Promise<string> {
-  // Serialize concurrent dump requests
-  if (dumpLock) {
+  // Serialize concurrent dump requests *per device*. Different devices must
+  // not share a lock or they will clobber each other's results.
+  const existing = dumpLocks.get(device);
+  if (existing) {
     try {
-      return await dumpLock;
+      return await existing;
     } catch {
-      // Previous dump failed, try our own
+      // Previous dump failed; fall through and start our own.
     }
   }
 
-  const promise = dumpUIInternal(device);
-  dumpLock = promise;
-
-  try {
-    const result = await promise;
-    return result;
-  } finally {
-    if (dumpLock === promise) dumpLock = null;
-  }
+  // Install the lock *synchronously* before any await, otherwise concurrent
+  // callers could race past the `dumpLocks.get()` check above and each kick
+  // off their own dumpUIInternal() (defeating the mutex).
+  let resolve!: (v: string) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<string>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  dumpLocks.set(device, promise);
+  dumpUIInternal(device)
+    .then(resolve, reject)
+    .finally(() => {
+      if (dumpLocks.get(device) === promise) dumpLocks.delete(device);
+    });
+  return await promise;
 }
 
 async function dumpUIInternal(device: string): Promise<string> {
   // Fast path: direct stdout via exec-out (single round-trip)
+  let fastPathError: unknown = null;
   try {
     const result = await adb(
       ["exec-out", "uiautomator", "dump", "/dev/tty"],
@@ -248,40 +271,66 @@ async function dumpUIInternal(device: string): Promise<string> {
     );
     const xml = result.stdout;
     const end = xml.lastIndexOf("</hierarchy>");
-    if (end > 0) {
+    if (end !== -1) {
       return xml.slice(0, end + "</hierarchy>".length);
     }
-  } catch (err: any) {
+    fastPathError = new AdbError(
+      "uiautomator fast path returned no </hierarchy> terminator",
+    );
+  } catch (err) {
+    fastPathError = err;
     // If device disconnected, fail fast
-    if (err.message?.includes("device") && err.message?.includes("not found")) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("device") && msg.includes("not found")) {
       invalidateDeviceCache(device);
       throw err;
     }
   }
 
-  // Slow fallback: file-based (two round-trips), exponential backoff
-  const path = "/data/local/tmp/ui_dump.xml";
+  // Slow fallback: file-based (two round-trips), exponential backoff.
+  // Use a unique path per call so concurrent invocations on different
+  // devices (or retries here) cannot read each other's stale dumps.
+  const path = `/data/local/tmp/ui_dump_${Date.now()}_${Math.floor(Math.random() * 1e6)}.xml`;
   const delays = [300, 600, 1200];
+  let lastSlowError: unknown = null;
+  let result: AdbResult | null = null;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await adb(["shell", `uiautomator dump ${path}`], {
-        device,
-        timeout: 10_000,
-      });
-      const result = await adb(["shell", `cat ${path}`], { device });
-      if (result.stdout.includes("<hierarchy")) {
-        return result.stdout;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await adb(["shell", "uiautomator", "dump", path], {
+          device,
+          timeout: 10_000,
+        });
+        const r = await adb(["shell", "cat", path], { device });
+        if (r.stdout.includes("<hierarchy")) {
+          result = r;
+          break;
+        }
+        lastSlowError = new AdbError(
+          "uiautomator dump file did not contain <hierarchy>",
+        );
+      } catch (err) {
+        lastSlowError = err;
       }
-    } catch {
-      if (attempt < delays.length) {
-        await sleep(delays[attempt]);
-      }
+      const delay = delays[attempt];
+      if (delay !== undefined) await sleep(delay);
     }
+  } finally {
+    // Best-effort cleanup; ignore failures (file may not exist).
+    adb(["shell", "rm", "-f", path], { device, timeout: 5_000 }).catch(() => {});
   }
 
+  if (result) return result.stdout;
+
+  const fastMsg =
+    fastPathError instanceof Error ? fastPathError.message : String(fastPathError);
+  const slowMsg =
+    lastSlowError instanceof Error ? lastSlowError.message : String(lastSlowError);
+
   throw new AdbError(
-    "Failed to dump UI hierarchy after 3 attempts. Screen may be animating or transitioning.",
+    `Failed to dump UI hierarchy after 3 attempts. Screen may be animating or transitioning.\n` +
+      `fast-path error: ${fastMsg}\nslow-path error: ${slowMsg}`,
   );
 }
 

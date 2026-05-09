@@ -2,7 +2,9 @@ import type { Bounds } from "../parsers/ui-types.js";
 
 export function parseBounds(raw: string): Bounds {
   const m = raw.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
-  if (!m) return { x1: 0, y1: 0, x2: 0, y2: 0 };
+  if (!m || m[1] === undefined || m[2] === undefined || m[3] === undefined || m[4] === undefined) {
+    return { x1: 0, y1: 0, x2: 0, y2: 0 };
+  }
   return {
     x1: parseInt(m[1], 10),
     y1: parseInt(m[2], 10),

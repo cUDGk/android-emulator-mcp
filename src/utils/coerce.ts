@@ -9,7 +9,11 @@ export function coerceObject<T>(val: unknown): T | undefined {
     try {
       const parsed = JSON.parse(val);
       if (parsed !== null && typeof parsed === "object") return parsed as T;
-    } catch {}
+    } catch {
+      // Safe to ignore: a non-parsable string is just "not coercible" and we
+      // signal that to the caller by returning undefined below. Logging here
+      // would spam stderr on every invalid-JSON probe from upstream.
+    }
     return undefined;
   }
   if (typeof val === "object") return val as T;

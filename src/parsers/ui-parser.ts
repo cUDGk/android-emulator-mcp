@@ -14,7 +14,7 @@ function toBool(val: string | undefined): boolean {
 
 function shortenClass(full: string): string {
   const parts = full.split(".");
-  return parts[parts.length - 1];
+  return parts[parts.length - 1] ?? full;
 }
 
 function shortenResourceId(full: string): string {
@@ -23,30 +23,39 @@ function shortenResourceId(full: string): string {
   return idx >= 0 ? full.slice(idx + 1) : full;
 }
 
-function parseNode(raw: any): UINode {
+// fast-xml-parser returns an untyped object graph; use a structural alias.
+type XmlNode = Record<string, unknown> & { node?: XmlNode | XmlNode[] };
+
+/** Extract a string attribute from an XmlNode, returning fallback if absent or wrong type. */
+function attr(raw: XmlNode, key: string, fallback = ""): string {
+  const v = raw[key];
+  return typeof v === "string" ? v : fallback;
+}
+
+function parseNode(raw: XmlNode): UINode {
   const children: UINode[] = [];
   if (raw.node) {
     const nodes = Array.isArray(raw.node) ? raw.node : [raw.node];
     for (const child of nodes) {
-      children.push(parseNode(child));
+      children.push(parseNode(child as XmlNode));
     }
   }
 
   return {
-    index: parseInt(raw["@_index"] || "0", 10),
-    text: raw["@_text"] || "",
-    resourceId: shortenResourceId(raw["@_resource-id"] || ""),
-    className: shortenClass(raw["@_class"] || "View"),
-    contentDesc: raw["@_content-desc"] || "",
-    bounds: parseBounds(raw["@_bounds"] || "[0,0][0,0]"),
-    clickable: toBool(raw["@_clickable"]),
-    scrollable: toBool(raw["@_scrollable"]),
-    focusable: toBool(raw["@_focusable"]),
-    focused: toBool(raw["@_focused"]),
-    checked: toBool(raw["@_checked"]),
-    selected: toBool(raw["@_selected"]),
-    enabled: toBool(raw["@_enabled"]),
-    password: toBool(raw["@_password"]),
+    index: parseInt(attr(raw, "@_index", "0"), 10),
+    text: attr(raw, "@_text"),
+    resourceId: shortenResourceId(attr(raw, "@_resource-id")),
+    className: shortenClass(attr(raw, "@_class") || "View"),
+    contentDesc: attr(raw, "@_content-desc"),
+    bounds: parseBounds(attr(raw, "@_bounds", "[0,0][0,0]")),
+    clickable: toBool(attr(raw, "@_clickable")),
+    scrollable: toBool(attr(raw, "@_scrollable")),
+    focusable: toBool(attr(raw, "@_focusable")),
+    focused: toBool(attr(raw, "@_focused")),
+    checked: toBool(attr(raw, "@_checked")),
+    selected: toBool(attr(raw, "@_selected")),
+    enabled: toBool(attr(raw, "@_enabled")),
+    password: toBool(attr(raw, "@_password")),
     children,
   };
 }
@@ -72,7 +81,12 @@ function filterVisible(node: UINode, maxDepth: number, depth: number): UINode | 
     return null;
   }
 
-  if (!hasContent(node) && !isInteractive(node) && filteredChildren.length === 1) {
+  if (
+    !hasContent(node) &&
+    !isInteractive(node) &&
+    filteredChildren.length === 1 &&
+    filteredChildren[0]
+  ) {
     return filteredChildren[0];
   }
 
@@ -148,9 +162,9 @@ export function parseXmlToTree(xml: string): ParsedUI {
     return { roots: [], totalNodes: 0 };
   }
 
-  const nodes = Array.isArray(hierarchy.node)
-    ? hierarchy.node
-    : [hierarchy.node];
+  const nodes: XmlNode[] = Array.isArray(hierarchy.node)
+    ? (hierarchy.node as XmlNode[])
+    : [hierarchy.node as XmlNode];
   const roots: UINode[] = nodes.map(parseNode);
   const totalNodes = roots.reduce((sum: number, r: UINode) => sum + countNodes(r), 0);
 
@@ -221,6 +235,10 @@ export function findElementsInTree(
   value: string,
   exact: boolean = false,
 ): UINode[] {
+  // An empty value with substring match would match every node in the tree.
+  // That is never what a caller wants, so short-circuit to no matches.
+  if (value === "") return [];
+
   const results: UINode[] = [];
   const valueLower = exact ? "" : value.toLowerCase();
 
